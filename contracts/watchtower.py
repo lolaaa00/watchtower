@@ -153,27 +153,30 @@ class Contract(gl.Contract):
     review_counter: u32
 
     sources: TreeMap[str, SourceRecord]
-    source_ids: DynArray[str]
+    source_ids: str
 
     profiles: TreeMap[str, WatchProfile]
-    profile_ids: DynArray[str]
+    profile_ids: str
 
     scans: TreeMap[str, ScanRecord]
-    scan_ids: DynArray[str]
+    scan_ids: str
 
     alerts: TreeMap[str, AlertRecord]
-    alert_ids: DynArray[str]
+    alert_ids: str
 
     actions: TreeMap[str, ActionRecord]
-    action_ids: DynArray[str]
+    action_ids: str
 
     reviews: TreeMap[str, ReReviewRecord]
-    review_ids: DynArray[str]
+    review_ids: str
 
-    keeper_stats: TreeMap[address, KeeperStats]
+    keeper_stats: TreeMap[str, KeeperStats]
     seen_item_digests: TreeMap[str, bool]
-    profile_alert_index: TreeMap[str, DynArray[str]]
-    source_scan_index: TreeMap[str, DynArray[str]]
+    profile_alert_index: TreeMap[str, str]
+    source_scan_index: TreeMap[str, str]
+    profile_scan_index: TreeMap[str, str]
+    source_alert_index: TreeMap[str, str]
+    keeper_scan_index: TreeMap[str, str]
 
     def __init__(self):
         self.owner = gl.message.sender_address
@@ -183,6 +186,12 @@ class Contract(gl.Contract):
         self.alert_counter = u32(0)
         self.action_counter = u32(0)
         self.review_counter = u32(0)
+        self.source_ids = ""
+        self.profile_ids = ""
+        self.scan_ids = ""
+        self.alert_ids = ""
+        self.action_ids = ""
+        self.review_ids = ""
 
     def _next_id(self, prefix: str, counter_name: str) -> str:
         val = getattr(self, counter_name)
@@ -190,9 +199,40 @@ class Contract(gl.Contract):
         setattr(self, counter_name, val)
         return f"{prefix}-{str(int(val)).zfill(6)}"
 
+    def _append_index(self, current: str, new_id: str) -> str:
+        if current == "":
+            return new_id
+        return current + "|" + new_id
+
+    def _index_page(self, stored: str, offset: int, limit: int) -> list:
+        if stored == "":
+            return []
+        ids = stored.split("|")
+        start = offset
+        end = min(start + limit, len(ids))
+        result = []
+        for i in range(start, end):
+            result.append(ids[i])
+        return result
+
+    def _index_all(self, stored: str) -> list:
+        if stored == "":
+            return []
+        return stored.split("|")
+
+    def _parse_int(self, value: str, field_name: str) -> int:
+        try:
+            parsed = int(value)
+        except Exception:
+            raise gl.UserError("INVALID_" + field_name)
+        if parsed < 0:
+            raise gl.UserError("INVALID_" + field_name)
+        return parsed
+
     def _update_keeper(self, keeper: address, now_ts: u64, alerts: u32, dupes: u32, failed: bool):
-        if keeper not in self.keeper_stats:
-            self.keeper_stats[keeper] = KeeperStats(
+        keeper_key = str(keeper)
+        if keeper_key not in self.keeper_stats:
+            self.keeper_stats[keeper_key] = KeeperStats(
                 keeper=keeper,
                 scans_triggered=u32(0),
                 alerts_found=u32(0),
@@ -202,7 +242,7 @@ class Contract(gl.Contract):
                 reputation_points=u32(0),
                 reputation_band="OBSERVER",
             )
-        stats = gl.storage.copy_to_memory(self.keeper_stats[keeper])
+        stats = gl.storage.copy_to_memory(self.keeper_stats[keeper_key])
         stats.scans_triggered = u32(stats.scans_triggered + u32(1))
         stats.alerts_found = u32(stats.alerts_found + alerts)
         stats.duplicate_scans = u32(stats.duplicate_scans + dupes)
@@ -221,7 +261,7 @@ class Contract(gl.Contract):
             stats.reputation_band = "SCANNER"
         else:
             stats.reputation_band = "OBSERVER"
-        self.keeper_stats[keeper] = stats
+        self.keeper_stats[keeper_key] = stats
 
     # ── READ METHODS ──
 
@@ -242,10 +282,34 @@ class Contract(gl.Contract):
 
     @gl.public.view
     def get_sources(self, offset: u32, limit: u32) -> list:
+        if int(self.source_counter) == 0:
+            return []
         result = []
-        ids = gl.storage.copy_to_memory(self.source_ids)
+        ids = self._index_all(self.source_ids)
         start = int(offset)
         end = min(start + int(limit), len(ids))
+        for i in range(start, end):
+            s = gl.storage.copy_to_memory(self.sources[ids[i]])
+            result.append({
+                "source_id": s.source_id, "authority": s.authority, "jurisdiction": s.jurisdiction,
+                "sector": s.sector, "source_type": s.source_type, "adapter": s.adapter,
+                "url": s.url, "trust_level": s.trust_level, "active": s.active,
+                "scan_interval_seconds": int(s.scan_interval_seconds),
+                "last_scanned_at": int(s.last_scanned_at), "next_due_at": int(s.next_due_at),
+                "cooldown_until": int(s.cooldown_until), "total_scans": int(s.total_scans),
+                "total_alerts": int(s.total_alerts), "last_error": s.last_error,
+            })
+        return result
+
+    @gl.public.view
+    def get_sources_page_v2(self, cursor_str: str, limit_str: str) -> list:
+        if int(self.source_counter) == 0:
+            return []
+        result = []
+        ids = self._index_all(self.source_ids)
+        start = self._parse_int(cursor_str, "CURSOR")
+        lim = self._parse_int(limit_str, "LIMIT")
+        end = min(start + lim, len(ids))
         for i in range(start, end):
             s = gl.storage.copy_to_memory(self.sources[ids[i]])
             result.append({
@@ -274,14 +338,44 @@ class Contract(gl.Contract):
 
     @gl.public.view
     def get_profiles_by_owner(self, owner: address, offset: u32, limit: u32) -> list:
+        if int(self.profile_counter) == 0:
+            return []
         result = []
-        ids = gl.storage.copy_to_memory(self.profile_ids)
+        ids = self._index_all(self.profile_ids)
         count = 0
         start = int(offset)
         lim = int(limit)
         for i in range(len(ids)):
             p = gl.storage.copy_to_memory(self.profiles[ids[i]])
             if p.owner == owner:
+                if count >= start:
+                    result.append({
+                        "profile_id": p.profile_id, "owner": str(p.owner),
+                        "company_name": p.company_name, "industry": p.industry,
+                        "jurisdictions": p.jurisdictions, "products": p.products,
+                        "risk_areas": p.risk_areas, "internal_teams": p.internal_teams,
+                        "keywords": p.keywords, "excluded_topics": p.excluded_topics,
+                        "active": p.active, "created_at": int(p.created_at),
+                        "updated_at": int(p.updated_at),
+                    })
+                    if len(result) >= lim:
+                        break
+                count += 1
+        return result
+
+    @gl.public.view
+    def get_profiles_by_owner_v2(self, owner_str: str, cursor_str: str, limit_str: str) -> list:
+        if int(self.profile_counter) == 0:
+            return []
+        result = []
+        ids = self._index_all(self.profile_ids)
+        count = 0
+        start = self._parse_int(cursor_str, "CURSOR")
+        lim = self._parse_int(limit_str, "LIMIT")
+        owner_norm = owner_str.lower()
+        for i in range(len(ids)):
+            p = gl.storage.copy_to_memory(self.profiles[ids[i]])
+            if str(p.owner).lower() == owner_norm:
                 if count >= start:
                     result.append({
                         "profile_id": p.profile_id, "owner": str(p.owner),
@@ -305,9 +399,19 @@ class Contract(gl.Contract):
         return s.active and now_ts >= s.next_due_at and now_ts >= s.cooldown_until
 
     @gl.public.view
+    def is_scan_due_v2(self, source_id: str, now_ts_str: str) -> bool:
+        now_ts = u64(self._parse_int(now_ts_str, "NOW_TS"))
+        if source_id not in self.sources:
+            raise gl.UserError("SOURCE_NOT_FOUND")
+        s = gl.storage.copy_to_memory(self.sources[source_id])
+        return s.active and now_ts >= s.next_due_at and now_ts >= s.cooldown_until
+
+    @gl.public.view
     def get_due_sources(self, now_ts: u64, offset: u32, limit: u32) -> list:
+        if int(self.source_counter) == 0:
+            return []
         result = []
-        ids = gl.storage.copy_to_memory(self.source_ids)
+        ids = self._index_all(self.source_ids)
         count = 0
         start = int(offset)
         lim = int(limit)
@@ -319,6 +423,24 @@ class Contract(gl.Contract):
                     if len(result) >= lim:
                         break
                 count += 1
+        return result
+
+    @gl.public.view
+    def get_due_sources_v2(self, profile_id: str, now_ts_str: str, limit_str: str) -> list:
+        if profile_id != "" and profile_id not in self.profiles:
+            raise gl.UserError("PROFILE_NOT_FOUND")
+        if int(self.source_counter) == 0:
+            return []
+        result = []
+        ids = self._index_all(self.source_ids)
+        now_ts = u64(self._parse_int(now_ts_str, "NOW_TS"))
+        lim = self._parse_int(limit_str, "LIMIT")
+        for i in range(len(ids)):
+            s = gl.storage.copy_to_memory(self.sources[ids[i]])
+            if s.active and now_ts >= s.next_due_at and now_ts >= s.cooldown_until:
+                result.append(s.source_id)
+                if len(result) >= lim:
+                    break
         return result
 
     @gl.public.view
@@ -360,20 +482,26 @@ class Contract(gl.Contract):
     def get_profile_alert_ids(self, profile_id: str, offset: u32, limit: u32) -> list:
         if profile_id not in self.profile_alert_index:
             return []
-        ids = gl.storage.copy_to_memory(self.profile_alert_index[profile_id])
-        start = int(offset)
-        end = min(start + int(limit), len(ids))
-        return [ids[i] for i in range(start, end)]
+        stored = self.profile_alert_index[profile_id]
+        return self._index_page(stored, int(offset), int(limit))
+
+    @gl.public.view
+    def get_profile_alert_ids_v2(self, profile_id: str, cursor_str: str, limit_str: str) -> list:
+        if profile_id not in self.profile_alert_index:
+            return []
+        return self._index_page(
+            self.profile_alert_index[profile_id],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
 
     @gl.public.view
     def get_alerts_for_profile(self, profile_id: str, offset: u32, limit: u32) -> list:
         if profile_id not in self.profile_alert_index:
             return []
-        ids = gl.storage.copy_to_memory(self.profile_alert_index[profile_id])
+        ids = self._index_page(self.profile_alert_index[profile_id], int(offset), int(limit))
         result = []
-        start = int(offset)
-        end = min(start + int(limit), len(ids))
-        for i in range(start, end):
+        for i in range(len(ids)):
             a = gl.storage.copy_to_memory(self.alerts[ids[i]])
             result.append({
                 "alert_id": a.alert_id, "profile_id": a.profile_id, "source_id": a.source_id,
@@ -386,14 +514,117 @@ class Contract(gl.Contract):
         return result
 
     @gl.public.view
+    def get_alerts_for_profile_v2(self, profile_id: str, cursor_str: str, limit_str: str) -> list:
+        if profile_id not in self.profile_alert_index:
+            return []
+        ids = self._index_page(
+            self.profile_alert_index[profile_id],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
+        result = []
+        for i in range(len(ids)):
+            a = gl.storage.copy_to_memory(self.alerts[ids[i]])
+            result.append({
+                "alert_id": a.alert_id, "profile_id": a.profile_id, "source_id": a.source_id,
+                "scan_id": a.scan_id, "authority": a.authority, "document_title": a.document_title,
+                "document_type": a.document_type, "relevance": a.relevance,
+                "materiality": a.materiality, "urgency": a.urgency,
+                "recommended_action": a.recommended_action, "status": a.status,
+                "created_at": int(a.created_at),
+            })
+        return result
+
+    @gl.public.view
+    def get_profile_scan_ids(self, profile_id: str, offset: u32, limit: u32) -> list:
+        if profile_id not in self.profile_scan_index:
+            return []
+        return self._index_page(self.profile_scan_index[profile_id], int(offset), int(limit))
+
+    @gl.public.view
+    def get_source_scan_ids(self, source_id: str, offset: u32, limit: u32) -> list:
+        if source_id not in self.source_scan_index:
+            return []
+        return self._index_page(self.source_scan_index[source_id], int(offset), int(limit))
+
+    @gl.public.view
+    def get_source_alert_ids(self, source_id: str, offset: u32, limit: u32) -> list:
+        if source_id not in self.source_alert_index:
+            return []
+        return self._index_page(self.source_alert_index[source_id], int(offset), int(limit))
+
+    @gl.public.view
+    def get_keeper_scan_ids(self, keeper_str: str, offset: u32, limit: u32) -> list:
+        if keeper_str not in self.keeper_scan_index:
+            return []
+        return self._index_page(self.keeper_scan_index[keeper_str], int(offset), int(limit))
+
+    @gl.public.view
+    def get_profile_scan_ids_v2(self, profile_id: str, cursor_str: str, limit_str: str) -> list:
+        if profile_id not in self.profile_scan_index:
+            return []
+        return self._index_page(
+            self.profile_scan_index[profile_id],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
+
+    @gl.public.view
+    def get_source_scan_ids_v2(self, source_id: str, cursor_str: str, limit_str: str) -> list:
+        if source_id not in self.source_scan_index:
+            return []
+        return self._index_page(
+            self.source_scan_index[source_id],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
+
+    @gl.public.view
+    def get_source_alert_ids_v2(self, source_id: str, cursor_str: str, limit_str: str) -> list:
+        if source_id not in self.source_alert_index:
+            return []
+        return self._index_page(
+            self.source_alert_index[source_id],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
+
+    @gl.public.view
+    def get_keeper_scan_ids_v2(self, keeper_str: str, cursor_str: str, limit_str: str) -> list:
+        if keeper_str not in self.keeper_scan_index:
+            return []
+        return self._index_page(
+            self.keeper_scan_index[keeper_str],
+            self._parse_int(cursor_str, "CURSOR"),
+            self._parse_int(limit_str, "LIMIT"),
+        )
+
+    @gl.public.view
     def get_keeper_stats(self, keeper: address) -> dict:
-        if keeper not in self.keeper_stats:
+        keeper_key = str(keeper)
+        if keeper_key not in self.keeper_stats:
             return {
                 "keeper": str(keeper), "scans_triggered": 0, "alerts_found": 0,
                 "duplicate_scans": 0, "failed_scans": 0, "last_active_at": 0,
                 "reputation_points": 0, "reputation_band": "OBSERVER",
             }
-        k = gl.storage.copy_to_memory(self.keeper_stats[keeper])
+        k = gl.storage.copy_to_memory(self.keeper_stats[keeper_key])
+        return {
+            "keeper": str(k.keeper), "scans_triggered": int(k.scans_triggered),
+            "alerts_found": int(k.alerts_found), "duplicate_scans": int(k.duplicate_scans),
+            "failed_scans": int(k.failed_scans), "last_active_at": int(k.last_active_at),
+            "reputation_points": int(k.reputation_points), "reputation_band": k.reputation_band,
+        }
+
+    @gl.public.view
+    def get_keeper_stats_v2(self, keeper_str: str) -> dict:
+        if keeper_str not in self.keeper_stats:
+            return {
+                "keeper": keeper_str, "scans_triggered": 0, "alerts_found": 0,
+                "duplicate_scans": 0, "failed_scans": 0, "last_active_at": 0,
+                "reputation_points": 0, "reputation_band": "OBSERVER",
+            }
+        k = gl.storage.copy_to_memory(self.keeper_stats[keeper_str])
         return {
             "keeper": str(k.keeper), "scans_triggered": int(k.scans_triggered),
             "alerts_found": int(k.alerts_found), "duplicate_scans": int(k.duplicate_scans),
@@ -434,7 +665,36 @@ class Contract(gl.Contract):
             total_scans=u32(0), total_alerts=u32(0), last_error="",
         )
         self.sources[sid] = rec
-        self.source_ids.append(sid)
+        self.source_ids = self._append_index(self.source_ids, sid)
+
+    @gl.public.write
+    def register_source_v2(
+        self, source_id: str, authority: str, jurisdiction: str, sector: str,
+        source_type: str, adapter_type: str, source_url: str, trust_level: str,
+        scan_interval_seconds_str: str, next_due_at_str: str,
+    ):
+        if gl.message.sender_address != self.owner:
+            raise gl.UserError("ONLY_OWNER")
+        if not source_url or len(source_url) < 10:
+            raise gl.UserError("INVALID_SOURCE_URL")
+        sid = source_id
+        if sid == "":
+            sid = self._next_id("SRC", "source_counter")
+        else:
+            if sid in self.sources:
+                raise gl.UserError("SOURCE_ALREADY_EXISTS")
+            self.source_counter = u32(int(self.source_counter) + 1)
+        rec = SourceRecord(
+            source_id=sid, authority=authority, jurisdiction=jurisdiction, sector=sector,
+            source_type=source_type, adapter=adapter_type, url=source_url, trust_level=trust_level,
+            active=True, scan_interval_seconds=u64(self._parse_int(scan_interval_seconds_str, "SCAN_INTERVAL_SECONDS")),
+            last_scanned_at=u64(0),
+            next_due_at=u64(self._parse_int(next_due_at_str, "NEXT_DUE_AT")),
+            cooldown_until=u64(0),
+            total_scans=u32(0), total_alerts=u32(0), last_error="",
+        )
+        self.sources[sid] = rec
+        self.source_ids = self._append_index(self.source_ids, sid)
 
     @gl.public.write
     def update_source(self, source_id: str, url: str, trust_level: str, scan_interval_seconds: u64):
@@ -474,7 +734,7 @@ class Contract(gl.Contract):
             excluded_topics=excluded_topics, active=True, created_at=now_ts, updated_at=now_ts,
         )
         self.profiles[pid] = rec
-        self.profile_ids.append(pid)
+        self.profile_ids = self._append_index(self.profile_ids, pid)
 
     @gl.public.write
     def update_watch_profile(
@@ -649,7 +909,20 @@ Return ONLY this JSON:
             scan_rec.error_code = str(e)[:100]
             scan_rec.completed_at = now_ts
             self.scans[scan_id] = scan_rec
-            self.scan_ids.append(scan_id)
+            self.scan_ids = self._append_index(self.scan_ids, scan_id)
+            existing_profile_scans = ""
+            if profile_id in self.profile_scan_index:
+                existing_profile_scans = self.profile_scan_index[profile_id]
+            self.profile_scan_index[profile_id] = self._append_index(existing_profile_scans, scan_id)
+            existing_source_scans = ""
+            if source_id in self.source_scan_index:
+                existing_source_scans = self.source_scan_index[source_id]
+            self.source_scan_index[source_id] = self._append_index(existing_source_scans, scan_id)
+            keeper_key = str(gl.message.sender_address)
+            existing_keeper_scans = ""
+            if keeper_key in self.keeper_scan_index:
+                existing_keeper_scans = self.keeper_scan_index[keeper_key]
+            self.keeper_scan_index[keeper_key] = self._append_index(existing_keeper_scans, scan_id)
             self._update_keeper(gl.message.sender_address, now_ts, u32(0), u32(0), True)
             src.last_scanned_at = now_ts
             src.next_due_at = u64(int(now_ts) + int(src.scan_interval_seconds))
@@ -695,10 +968,15 @@ Return ONLY this JSON:
                 status="OPEN", created_at=now_ts, resolved_at=u64(0), last_reviewed_at=u64(0),
             )
             self.alerts[aid] = alert
-            self.alert_ids.append(aid)
-            if profile_id not in self.profile_alert_index:
-                self.profile_alert_index[profile_id] = DynArray[str]()
-            self.profile_alert_index[profile_id].append(aid)
+            self.alert_ids = self._append_index(self.alert_ids, aid)
+            existing_profile_alerts = ""
+            if profile_id in self.profile_alert_index:
+                existing_profile_alerts = self.profile_alert_index[profile_id]
+            self.profile_alert_index[profile_id] = self._append_index(existing_profile_alerts, aid)
+            existing_source_alerts = ""
+            if source_id in self.source_alert_index:
+                existing_source_alerts = self.source_alert_index[source_id]
+            self.source_alert_index[source_id] = self._append_index(existing_source_alerts, aid)
             alert_count = u32(int(alert_count) + 1)
 
         scan_rec.status = "COMPLETED" if int(alert_count) > 0 else "NO_UPDATES"
@@ -708,10 +986,20 @@ Return ONLY this JSON:
         scan_rec.duplicate_count = dupe_count
         scan_rec.result_summary = f"{int(candidate_count)} candidates, {int(alert_count)} alerts, {int(dupe_count)} dupes"
         self.scans[scan_id] = scan_rec
-        self.scan_ids.append(scan_id)
-        if source_id not in self.source_scan_index:
-            self.source_scan_index[source_id] = DynArray[str]()
-        self.source_scan_index[source_id].append(scan_id)
+        self.scan_ids = self._append_index(self.scan_ids, scan_id)
+        existing_profile_scans = ""
+        if profile_id in self.profile_scan_index:
+            existing_profile_scans = self.profile_scan_index[profile_id]
+        self.profile_scan_index[profile_id] = self._append_index(existing_profile_scans, scan_id)
+        existing_source_scans = ""
+        if source_id in self.source_scan_index:
+            existing_source_scans = self.source_scan_index[source_id]
+        self.source_scan_index[source_id] = self._append_index(existing_source_scans, scan_id)
+        keeper_key = str(gl.message.sender_address)
+        existing_keeper_scans = ""
+        if keeper_key in self.keeper_scan_index:
+            existing_keeper_scans = self.keeper_scan_index[keeper_key]
+        self.keeper_scan_index[keeper_key] = self._append_index(existing_keeper_scans, scan_id)
 
         src.last_scanned_at = now_ts
         src.next_due_at = u64(int(now_ts) + int(src.scan_interval_seconds))
@@ -823,7 +1111,7 @@ Allowed outcome: UPHELD, RECLASSIFIED, URGENCY_RAISED, URGENCY_REDUCED, MATERIAL
                 created_at=now_ts, completed_at=now_ts,
             )
             self.reviews[rid] = rev
-            self.review_ids.append(rid)
+            self.review_ids = self._append_index(self.review_ids, rid)
             return
 
         new_verdict = json.dumps(new_verdict_data)
@@ -850,7 +1138,7 @@ Allowed outcome: UPHELD, RECLASSIFIED, URGENCY_RAISED, URGENCY_REDUCED, MATERIAL
             created_at=now_ts, completed_at=now_ts,
         )
         self.reviews[rid] = rev
-        self.review_ids.append(rid)
+        self.review_ids = self._append_index(self.review_ids, rid)
 
     @gl.public.write
     def resolve_action(self, action_id: str, note: str, now_ts: u64):
@@ -902,4 +1190,4 @@ Allowed outcome: UPHELD, RECLASSIFIED, URGENCY_RAISED, URGENCY_REDUCED, MATERIAL
             created_at=now_ts, completed_at=u64(0), note="",
         )
         self.actions[aid] = act
-        self.action_ids.append(aid)
+        self.action_ids = self._append_index(self.action_ids, aid)

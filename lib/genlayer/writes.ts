@@ -4,6 +4,7 @@ import { getContractAddress } from "./client";
 export async function registerSource(
   client: WatchtowerClient,
   params: {
+    source_id?: string;
     authority: string;
     jurisdiction: string;
     sector: string;
@@ -17,11 +18,12 @@ export async function registerSource(
 ) {
   return client.writeContract({
     address: getContractAddress(),
-    functionName: "register_source",
+    functionName: "register_source_v2",
     args: [
+      params.source_id || "",
       params.authority, params.jurisdiction, params.sector,
       params.source_type, params.adapter, params.url, params.trust_level,
-      params.scan_interval_seconds, params.next_due_at,
+      String(params.scan_interval_seconds), String(params.next_due_at),
     ],
     value: BigInt(0),
   });

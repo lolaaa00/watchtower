@@ -52,7 +52,7 @@ export async function getSource(client: WatchtowerClient, sourceId: string): Pro
 
 export async function getKeeperStats(client: WatchtowerClient, keeper: string): Promise<KeeperStatsRecord> {
   try {
-    return (await read(client, "get_keeper_stats", [keeper])) as KeeperStatsRecord;
+    return (await read(client, "get_keeper_stats_v2", [keeper])) as KeeperStatsRecord;
   } catch {
     return { keeper, scans_triggered: 0, alerts_found: 0, duplicate_scans: 0, failed_scans: 0, last_active_at: 0, reputation_points: 0, reputation_band: "OBSERVER" };
   }
@@ -61,7 +61,7 @@ export async function getKeeperStats(client: WatchtowerClient, keeper: string): 
 // get_alerts_for_profile works because first arg is str
 export async function getAlertsForProfile(client: WatchtowerClient, profileId: string, offset = 0, limit = 50): Promise<AlertRecord[]> {
   try {
-    return (await read(client, "get_alerts_for_profile", [profileId, offset, limit])) as AlertRecord[];
+    return (await read(client, "get_alerts_for_profile_v2", [profileId, String(offset), String(limit)])) as AlertRecord[];
   } catch {
     return [];
   }
@@ -70,7 +70,7 @@ export async function getAlertsForProfile(client: WatchtowerClient, profileId: s
 // get_profile_alert_ids works because first arg is str
 export async function getProfileAlertIds(client: WatchtowerClient, profileId: string, offset = 0, limit = 50): Promise<string[]> {
   try {
-    return (await read(client, "get_profile_alert_ids", [profileId, offset, limit])) as string[];
+    return (await read(client, "get_profile_alert_ids_v2", [profileId, String(offset), String(limit)])) as string[];
   } catch {
     return [];
   }
@@ -79,55 +79,29 @@ export async function getProfileAlertIds(client: WatchtowerClient, profileId: st
 // ── WORKAROUND METHODS (avoid broken u64/address-first-arg calls) ──
 
 // get_sources(u32, u32) fails — reconstruct from individual get_source calls
-export async function getSources(client: WatchtowerClient, _offset = 0, _limit = 50): Promise<SourceRecord[]> {
+export async function getSources(client: WatchtowerClient, offset = 0, limit = 50): Promise<SourceRecord[]> {
   try {
-    const summary = await getContractSummary(client);
-    const total = summary.total_sources;
-    if (total === 0) return [];
-    const results: SourceRecord[] = [];
-    for (let i = 1; i <= total; i++) {
-      const sid = `SRC-${String(i).padStart(6, "0")}`;
-      try {
-        const s = await getSource(client, sid);
-        if (s && s.source_id) results.push(s);
-      } catch { /* source may not exist at this ID */ }
-    }
-    return results;
+    return (await read(client, "get_sources_page_v2", [String(offset), String(limit)])) as SourceRecord[];
   } catch {
     return [];
   }
 }
 
 // get_profiles_by_owner(address, u32, u32) fails — reconstruct from get_profile
-export async function getProfilesByOwner(client: WatchtowerClient, owner: string, _offset = 0, _limit = 20): Promise<WatchProfile[]> {
+export async function getProfilesByOwner(client: WatchtowerClient, owner: string, offset = 0, limit = 20): Promise<WatchProfile[]> {
   if (!owner) return [];
   try {
-    const summary = await getContractSummary(client);
-    const total = summary.total_profiles;
-    if (total === 0) return [];
-    const results: WatchProfile[] = [];
-    for (let i = 1; i <= total; i++) {
-      const pid = `PRF-${String(i).padStart(6, "0")}`;
-      try {
-        const p = await getProfile(client, pid);
-        if (p && p.owner && p.owner.toLowerCase() === owner.toLowerCase()) {
-          results.push(p);
-        }
-      } catch { /* profile may not exist */ }
-    }
-    return results;
+    return (await read(client, "get_profiles_by_owner_v2", [owner, String(offset), String(limit)])) as WatchProfile[];
   } catch {
     return [];
   }
 }
 
 // get_due_sources(u64, u32, u32) fails — reconstruct from getSources + timestamp check
-export async function getDueSources(client: WatchtowerClient, nowTs: number, _offset = 0, _limit = 50): Promise<string[]> {
+export async function getDueSources(client: WatchtowerClient, nowTs: number, _offset = 0, limit = 50): Promise<string[]> {
+  void _offset;
   try {
-    const sources = await getSources(client);
-    return sources
-      .filter((s) => s.active && nowTs >= s.next_due_at && nowTs >= s.cooldown_until)
-      .map((s) => s.source_id);
+    return (await read(client, "get_due_sources_v2", ["", String(nowTs), String(limit)])) as string[];
   } catch {
     return [];
   }
@@ -136,8 +110,7 @@ export async function getDueSources(client: WatchtowerClient, nowTs: number, _of
 // is_scan_due(str, u64) fails — check locally
 export async function isScanDue(client: WatchtowerClient, sourceId: string, nowTs: number): Promise<boolean> {
   try {
-    const s = await getSource(client, sourceId);
-    return s.active && nowTs >= s.next_due_at && nowTs >= s.cooldown_until;
+    return (await read(client, "is_scan_due_v2", [sourceId, String(nowTs)])) as boolean;
   } catch {
     return false;
   }
