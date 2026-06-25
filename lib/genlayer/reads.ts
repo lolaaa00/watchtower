@@ -9,22 +9,34 @@ import type {
   ContractSummary,
 } from "../types";
 
-async function read(client: WatchtowerClient, functionName: string, args: any[] = []): Promise<any> {
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function read(client: WatchtowerClient, functionName: string, args: any[] = [], retries = 3): Promise<any> {
   const contractAddr = getContractAddress();
-  console.debug(`[read] ${functionName}(${JSON.stringify(args)}) on ${contractAddr}`);
-  try {
-    return await client.readContract({
-      address: contractAddr,
-      functionName,
-      args,
-    });
-  } catch (e: any) {
-    console.error(`[read] ${functionName} failed | contract=${contractAddr} | args=${JSON.stringify(args)} | error=${e?.message?.slice(0, 150)}`);
-    throw e;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await client.readContract({
+        address: contractAddr,
+        functionName,
+        args,
+      });
+    } catch (e: any) {
+      const msg = e?.message || "";
+      const isRetryable = msg.includes("Server busy") || msg.includes("execution slots") || msg.includes("ETIMEDOUT") || msg.includes("ECONNRESET");
+      if (isRetryable && attempt < retries) {
+        console.warn(`[read] ${functionName} busy, retry ${attempt}/${retries} in ${attempt * 3}s`);
+        await sleep(attempt * 3000);
+        continue;
+      }
+      console.error(`[read] ${functionName} failed | args=${JSON.stringify(args).slice(0, 100)} | error=${msg.slice(0, 120)}`);
+      throw e;
+    }
   }
 }
 
-// ── WORKING METHODS (no u64 first-arg issue) ──
+// ── DIRECT METHODS ──
 
 export async function getContractSummary(client: WatchtowerClient): Promise<ContractSummary> {
   try {
@@ -52,22 +64,44 @@ export async function getSource(client: WatchtowerClient, sourceId: string): Pro
 
 export async function getKeeperStats(client: WatchtowerClient, keeper: string): Promise<KeeperStatsRecord> {
   try {
-    return (await read(client, "get_keeper_stats_v2", [keeper])) as KeeperStatsRecord;
+    // Try checksummed first, then as-is
+    const result = (await read(client, "get_keeper_stats", [keeper])) as KeeperStatsRecord;
+    if (result.scans_triggered > 0) return result;
+    // The contract may store with different casing — try fetching all known keepers
+    const summary = await getContractSummary(client);
+    for (let i = 1; i <= summary.total_scans; i++) {
+      try {
+        const scan = await getScan(client, `SCN-${String(i).padStart(6, "0")}`);
+        if (scan.triggered_by && scan.triggered_by.toLowerCase() === keeper.toLowerCase()) {
+          return (await read(client, "get_keeper_stats", [scan.triggered_by])) as KeeperStatsRecord;
+        }
+      } catch { /* skip */ }
+    }
+    return result;
   } catch {
     return { keeper, scans_triggered: 0, alerts_found: 0, duplicate_scans: 0, failed_scans: 0, last_active_at: 0, reputation_points: 0, reputation_band: "OBSERVER" };
   }
 }
 
-// get_alerts_for_profile works because first arg is str
 export async function getAlertsForProfile(client: WatchtowerClient, profileId: string, offset = 0, limit = 50): Promise<AlertRecord[]> {
   try {
     return (await read(client, "get_alerts_for_profile_v2", [profileId, String(offset), String(limit)])) as AlertRecord[];
   } catch {
-    return [];
+    // Fallback: get alert IDs then fetch individually
+    try {
+      const summary = await getContractSummary(client);
+      const results: AlertRecord[] = [];
+      for (let i = 1; i <= summary.total_alerts; i++) {
+        try {
+          const a = await getAlert(client, `ALT-${String(i).padStart(6, "0")}`);
+          if (a.profile_id === profileId) results.push(a);
+        } catch { /* skip */ }
+      }
+      return results;
+    } catch { return []; }
   }
 }
 
-// get_profile_alert_ids works because first arg is str
 export async function getProfileAlertIds(client: WatchtowerClient, profileId: string, offset = 0, limit = 50): Promise<string[]> {
   try {
     return (await read(client, "get_profile_alert_ids_v2", [profileId, String(offset), String(limit)])) as string[];
@@ -76,42 +110,68 @@ export async function getProfileAlertIds(client: WatchtowerClient, profileId: st
   }
 }
 
-// ── WORKAROUND METHODS (avoid broken u64/address-first-arg calls) ──
+// ── WORKAROUND METHODS ──
 
-// get_sources(u32, u32) fails — reconstruct from individual get_source calls
-export async function getSources(client: WatchtowerClient, offset = 0, limit = 50): Promise<SourceRecord[]> {
+export async function getSources(client: WatchtowerClient): Promise<SourceRecord[]> {
   try {
-    return (await read(client, "get_sources_page_v2", [String(offset), String(limit)])) as SourceRecord[];
+    return (await read(client, "get_sources_page_v2", ["0", "50"])) as SourceRecord[];
   } catch {
-    return [];
+    // Fallback: fetch individually
+    try {
+      const summary = await getContractSummary(client);
+      const results: SourceRecord[] = [];
+      for (let i = 1; i <= summary.total_sources; i++) {
+        try {
+          const s = await getSource(client, `SRC-${String(i).padStart(6, "0")}`);
+          if (s && s.source_id) results.push(s);
+        } catch { /* skip */ }
+      }
+      return results;
+    } catch { return []; }
   }
 }
 
-// get_profiles_by_owner(address, u32, u32) fails — reconstruct from get_profile
-export async function getProfilesByOwner(client: WatchtowerClient, owner: string, offset = 0, limit = 20): Promise<WatchProfile[]> {
+export async function getProfilesByOwner(client: WatchtowerClient, owner: string): Promise<WatchProfile[]> {
   if (!owner) return [];
   try {
-    return (await read(client, "get_profiles_by_owner_v2", [owner, String(offset), String(limit)])) as WatchProfile[];
+    return (await read(client, "get_profiles_by_owner_v2", [owner, "0", "20"])) as WatchProfile[];
   } catch {
-    return [];
+    // Fallback: fetch individually and filter
+    try {
+      const summary = await getContractSummary(client);
+      const results: WatchProfile[] = [];
+      for (let i = 1; i <= summary.total_profiles; i++) {
+        try {
+          const p = await getProfile(client, `PRF-${String(i).padStart(6, "0")}`);
+          if (p && p.owner && p.owner.toLowerCase() === owner.toLowerCase()) results.push(p);
+        } catch { /* skip */ }
+      }
+      return results;
+    } catch { return []; }
   }
 }
 
-// get_due_sources(u64, u32, u32) fails — reconstruct from getSources + timestamp check
-export async function getDueSources(client: WatchtowerClient, nowTs: number, _offset = 0, limit = 50): Promise<string[]> {
-  void _offset;
+export async function getDueSources(client: WatchtowerClient, nowTs: number): Promise<string[]> {
   try {
-    return (await read(client, "get_due_sources_v2", ["", String(nowTs), String(limit)])) as string[];
+    return (await read(client, "get_due_sources_v2", ["", String(nowTs), "50"])) as string[];
   } catch {
-    return [];
+    // Fallback: fetch all sources and filter locally
+    try {
+      const sources = await getSources(client);
+      return sources
+        .filter((s) => s.active && nowTs >= s.next_due_at && nowTs >= s.cooldown_until)
+        .map((s) => s.source_id);
+    } catch { return []; }
   }
 }
 
-// is_scan_due(str, u64) fails — check locally
 export async function isScanDue(client: WatchtowerClient, sourceId: string, nowTs: number): Promise<boolean> {
   try {
     return (await read(client, "is_scan_due_v2", [sourceId, String(nowTs)])) as boolean;
   } catch {
-    return false;
+    try {
+      const s = await getSource(client, sourceId);
+      return s.active && nowTs >= s.next_due_at && nowTs >= s.cooldown_until;
+    } catch { return false; }
   }
 }

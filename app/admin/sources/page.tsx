@@ -25,6 +25,19 @@ interface SourceTemplate {
 
 const TEMPLATES: SourceTemplate[] = [
   {
+    slug: "cfpb-rules-notices",
+    display_name: "CFPB — Consumer Financial Rules & Notices",
+    authority: "CFPB",
+    jurisdiction: "US",
+    sector: "financial_services",
+    source_type: "API",
+    adapter: "FEDERAL_REGISTER_API",
+    url: "https://www.federalregister.gov/api/v1/documents.json?conditions%5Bagencies%5D%5B%5D=consumer-financial-protection-bureau&per_page=5&order=newest",
+    trust_level: "OFFICIAL",
+    scan_interval_seconds: 86400,
+    description: "CFPB-only rules and notices via Federal Register API. Returns lending, disclosure, and consumer protection regulations directly relevant to fintechs.",
+  },
+  {
     slug: "federal-register-financial",
     display_name: "Federal Register — Financial Services",
     authority: "Federal Register",
@@ -91,7 +104,7 @@ export default function AuthorityControlPage() {
     getContractSummary(client).then((s) => setOwner(s.owner)).catch(() => {});
     getSources(client).then((s) => {
       setRegisteredSources(s);
-      if (s.some((src) => src.authority === "Federal Register")) {
+      if (s.some((src) => src.authority === "Federal Register" || src.authority === "CFPB")) {
         setFederalRegGreen(true);
       }
     }).catch(() => {});
@@ -129,7 +142,7 @@ export default function AuthorityControlPage() {
       // Refresh sources
       const updated = await getSources(client);
       setRegisteredSources(updated);
-      if (template.slug === "federal-register-financial") {
+      if (template.slug === "federal-register-financial" || template.slug === "cfpb-rules-notices") {
         setFederalRegGreen(true);
       }
     } catch (e: any) {
@@ -198,8 +211,8 @@ export default function AuthorityControlPage() {
         {TEMPLATES.map((t, i) => {
           const registered = isRegistered(t);
           const tx = txStates[t.slug] || { status: "idle" };
-          const isFedReg = t.slug === "federal-register-financial";
-          const canRegister = isFedReg || federalRegGreen;
+          const isPrimary = t.slug === "cfpb-rules-notices" || t.slug === "federal-register-financial";
+          const canRegister = isPrimary || federalRegGreen;
 
           return (
             <div key={t.slug} className="obs-aperture p-4">
@@ -242,7 +255,7 @@ export default function AuthorityControlPage() {
 
               {!registered && (
                 <>
-                  {!canRegister && !isFedReg ? (
+                  {!canRegister && !isPrimary ? (
                     <p className="text-[10px]" style={{ color: "var(--muted-instrument)" }}>
                       Register after Federal Register is green.
                     </p>

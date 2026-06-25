@@ -8,7 +8,7 @@ export async function waitForTx(
   return client.waitForTransactionReceipt({
     hash: hash as any,
     status: status as any,
-    interval: 3000,
-    retries: 40,
+    interval: 5000,
+    retries: 120,
   });
 }
